@@ -1,7 +1,7 @@
 #pragma once
 
 #include "DRMPlayer.h"
-#include "gstocdmdecrypt.h"
+#include "GstOcdmDecrypt.h"
 #include <gst/gst.h>
 
 namespace WPEFramework {
@@ -27,6 +27,7 @@ namespace Player {
                         break;
                     }
                     case GST_MESSAGE_EOS: {
+                        TRACE_L1("Reached end of stream");
                         gst_element_set_state(data->_playbin, GST_STATE_NULL);
                         break;
                     }

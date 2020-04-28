@@ -34,7 +34,7 @@ set(LIB_NAME PlayerPlatform${PLAYER_NAME})
 
 add_library(${LIB_NAME} STATIC
      PlayerImplementation.cpp
-     ${CMAKE_CURRENT_SOURCE_DIR}/GstDecrypt/gstocdmdecrypt.cpp)
+     ${CMAKE_CURRENT_SOURCE_DIR}/GstDecrypt/GstOcdmDecrypt.cpp)
 
 set_target_properties(${LIB_NAME} PROPERTIES
         CXX_STANDARD 11

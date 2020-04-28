@@ -17,49 +17,55 @@
  * limitations under the License.
  */
 
-#include <WPEFramework/plugins/Request.h>
-#include <WPEFramework/protocols/WebLink.h>
+#include "open_cdm.h"
+#include "open_cdm_adapter.h"
+#include <plugins/Request.h>
+#include <vector>
+#include <websocket/WebLink.h>
 #include <websocket/WebTransfer.h>
 
 namespace WPEFramework {
 namespace {
 
+    // TODO: Figure out a better name
     class Challenger {
 
     private:
-        static void process_challenge_callback(struct OpenCDMSession* session, void* userData, const char url[], const uint8_t challenge[], const uint16_t challengeLength)
+        static void process_challenge_callback(OpenCDMSession* session, void* userData, const char url[], const uint8_t challenge[], const uint16_t challengeLength)
         {
             Challenger* comm = reinterpret_cast<Challenger*>(userData);
-            comm->ProcessChallengeCallback(url, challenge, challengeLength);
+            string challengeData(reinterpret_cast<const char*>(challenge), challengeLength);
+            comm->ProcessChallengeCallback(session, url, challengeData);
         }
 
-        static void key_update_callback(struct OpenCDMSession* session, void* userData, const uint8_t keyId[], const uint8_t length)
+        static void key_update_callback(OpenCDMSession* session, void* userData, const uint8_t keyId[], const uint8_t length)
         {
             Challenger* comm = reinterpret_cast<Challenger*>(userData);
-            comm->KeyUpdateCallback();
+            comm->KeyUpdateCallback(session, userData, keyId, length);
         }
 
-        static void error_message_callback(struct OpenCDMSession* session, void* userData, const char message[])
+        static void error_message_callback(OpenCDMSession* session, void* userData, const char message[])
         {
             Challenger* comm = reinterpret_cast<Challenger*>(userData);
             comm->ErrorMessageCallback();
         }
 
-        static void keys_updated_callback(const struct OpenCDMSession* session, void* userData)
+        static void keys_updated_callback(const OpenCDMSession* session, void* userData)
         {
             Challenger* comm = reinterpret_cast<Challenger*>(userData);
             comm->KeysUpdatedCallback();
         }
 
-        void ProcessChallengeCallback(const char url[], const uint8_t challenge[], const uint16_t challengeLength)
+        void ProcessChallengeCallback(OpenCDMSession* session, const string& url, const string& challenge)
         {
-            TRACE_L1("Processing challenge to url: %s", url);
-            _server.Exchange(url, challenge, challengeLength);
+            TRACE_L1("Processing challenge to url: %s", url.c_str());
+
+            string challengeResponse;
+            _server.Exchange(url, challenge);
         }
 
-        void KeyUpdateCallback()
+        void KeyUpdateCallback(OpenCDMSession* session, void* userData, const uint8_t keyId[], const uint8_t length)
         {
-            TRACE_L1("Key Update Callback called");
         }
 
         void ErrorMessageCallback()
@@ -98,7 +104,7 @@ namespace {
                 Close(Core::infinite);
             }
 
-            void Exchange(string rawUrl, const uint8_t challenge[], const uint16_t challengeLength)
+            void Exchange(const string& rawUrl, const string& challenge)
             {
                 Core::URL url(rawUrl);
                 _challengeRequest->Path = '/' + url.Path().Value();
@@ -109,7 +115,7 @@ namespace {
                     TRACE_L1("Connection to %s unavailable", rawUrl.c_str());
                 } else {
 
-                    InitializeBody(challenge, challengeLength);
+                    InitializeBody(challenge);
 
                     Link().RemoteNode(remoteNode);
                     Link().LocalNode(remoteNode.AnyInterface());
@@ -121,26 +127,28 @@ namespace {
                 }
             }
 
+            void KeyResponse(string& challengeResponse)
+            {
+                challengeResponse.assign(*_bodyResponse);
+            }
+
         private:
             /* TODO:
-            *   It looks like the challenge data coming over from OCDM has this: ':Type:' prefix.
-            *   Why is this supposed to be ommited when sending the challenge request ?
-            *   And more importantly, why should it be done in the challenge handler ?
+            *   Is this what the EME spec calls sanitizing?
+            *   What is this ':Type:' string ?
             */
-
-            void InitializeBody(const uint8_t challenge[], const uint16_t challengeLength)
+            void InitializeBody(const string& challenge)
             {
-                string body(reinterpret_cast<const char*>(challenge), challengeLength);
-
-                size_t index = body.find(":Type:");
+                size_t index = challenge.find(":Type:");
                 size_t offset = 0;
 
-                if (index != std::string::npos) 
+                if (index != std::string::npos)
                     offset = index + strlen(":Type:");
 
-                _bodyRequest->assign(body, offset, body.length() - offset);
+                _bodyRequest->assign(challenge.substr(offset));
                 _challengeRequest->Body<Web::TextBody>(_bodyRequest);
                 _challengeRequest->ContentType = Web::MIMETypes::MIME_TEXT_XML;
+                _challengeRequest->ContentLength = challenge.substr(offset).length();
             }
 
             // Web::WebLinkType methods
@@ -153,15 +161,12 @@ namespace {
 
             void Received(Core::ProxyType<Web::Response>& response) override
             {
-                std::string s;
-                response->ToString(s);
+                TRACE_L1("Received challenge response");
                 _waitForEvent.SetEvent();
-                TRACE_L1("Received challenge response \n\n%s\n\n", s.c_str());
             }
 
             void Send(const Core::ProxyType<Web::Request>& request) override
             {
-                TRACE_L1("Sending request");
                 ASSERT(request == _challengeRequest);
             }
 
@@ -195,6 +200,11 @@ namespace {
         OpenCDMSessionCallbacks& OcdmCallbacks()
         {
             return _callbacks;
+        }
+
+        void KeyResponse(string& response)
+        {
+            _server.KeyResponse(response);
         }
 
     private:

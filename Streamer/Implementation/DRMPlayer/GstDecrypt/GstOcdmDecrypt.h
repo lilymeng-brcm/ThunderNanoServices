@@ -24,11 +24,8 @@
 #include <gst/gst.h>
 #include <ocdm/open_cdm.h>
 
-namespace WPEFramework {
-namespace {
-    class Communicator;
-}
-}
+#include "Challenger.h"
+#include <memory>
 
 G_BEGIN_DECLS
 
@@ -40,12 +37,11 @@ G_BEGIN_DECLS
 
 typedef struct _GstOcdmdecrypt GstOcdmdecrypt;
 typedef struct _GstOcdmdecryptClass GstOcdmdecryptClass;
+typedef struct _GstOcdmdecryptImpl GstOcdmDecryptImpl;
 
 struct _GstOcdmdecrypt {
     GstBaseTransform base_ocdmdecrypt;
-    GstPad *sinkpad, *srcpad;
-    OpenCDMSystem* ocdmSystem;
-    OpenCDMSession* ocdmSession;
+    std::unique_ptr<GstOcdmDecryptImpl> impl;
 };
 
 struct _GstOcdmdecryptClass {
