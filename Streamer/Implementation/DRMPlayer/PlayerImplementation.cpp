@@ -29,7 +29,7 @@ namespace Player {
             {
                 gst_init(0, nullptr);
                 uint16_t speedsLen = config.Speeds.Length();
-
+                GST_FIXME("Dumping dot files from DRMPlayer not supported");
                 if ((config.Speeds.IsSet() == true) && (speedsLen != 0)) {
                     auto speedsIt(config.Speeds.Elements());
                     _vecSpeeds.reserve(speedsLen);

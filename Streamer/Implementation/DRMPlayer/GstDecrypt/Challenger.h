@@ -121,7 +121,7 @@ namespace {
                     Link().LocalNode(remoteNode.AnyInterface());
                     uint32_t result = Open(0);
 
-                    if (_waitForEvent.Lock(3000) != Core::ERROR_NONE) {
+                    if (_waitForEvent.Lock(4000) != Core::ERROR_NONE) {
                         TRACE_L1("Unhandled error while sending challenge request: %d", result);
                     }
                 }
@@ -139,6 +139,8 @@ namespace {
             */
             void InitializeBody(const string& challenge)
             {
+
+                TRACE_L1("request: -----< %s >-----", challenge.c_str());
                 size_t index = challenge.find(":Type:");
                 size_t offset = 0;
 
@@ -162,6 +164,9 @@ namespace {
             void Received(Core::ProxyType<Web::Response>& response) override
             {
                 TRACE_L1("Received challenge response");
+                std::string hello;
+                response->ToString(hello);
+                TRACE_L1("--------------- ::::: Response :::: %s ::::", hello.c_str());
                 _waitForEvent.SetEvent();
             }
 

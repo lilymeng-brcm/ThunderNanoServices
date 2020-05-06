@@ -41,7 +41,7 @@ typedef struct _GstOcdmdecryptImpl GstOcdmDecryptImpl;
 
 struct _GstOcdmdecrypt {
     GstBaseTransform base_ocdmdecrypt;
-    std::unique_ptr<GstOcdmDecryptImpl> impl;
+    std::shared_ptr<GstOcdmDecryptImpl> impl;
 };
 
 struct _GstOcdmdecryptClass {
