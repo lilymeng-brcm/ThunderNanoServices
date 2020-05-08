@@ -133,10 +133,6 @@ namespace {
             }
 
         private:
-            /* TODO:
-            *   Is this what the EME spec calls sanitizing?
-            *   What is this ':Type:' string ?
-            */
             void InitializeBody(const string& challenge)
             {
 

@@ -126,6 +126,14 @@ static void gst_ocdmdecrypt_init(GstOcdmdecrypt* ocdmdecrypt)
     ocdmdecrypt->impl = std::move(std::unique_ptr<GstOcdmDecryptImpl>(new GstOcdmDecryptImpl()));
     ocdmdecrypt->impl->_ocdmSession = nullptr;
     ocdmdecrypt->impl->_ocdmSystem = nullptr;
+
+    GST_FIXME_OBJECT(ocdmdecrypt, "Pretty bad leaks");
+    GST_FIXME_OBJECT(ocdmdecrypt, "Decryption doesn't wait for the key status");
+    GST_FIXME_OBJECT(ocdmdecrypt, "Flushing the pipeline doesn't free ocdm system/session");
+    GST_FIXME_OBJECT(ocdmdecrypt, "Element is accepting all caps");
+    GST_FIXME_OBJECT(ocdmdecrypt, "Upstream caps transformation not implemented");
+    GST_FIXME_OBJECT(ocdmdecrypt, "Caps are constructed based on hard coded keysystem values");
+    GST_FIXME_OBJECT(ocdmdecrypt, "Element doesn't handle dash manifests - mpd");
 }
 
 static void clearCencStruct(GstStructure*& structure)
@@ -142,9 +150,7 @@ static GstCaps* TransformCaps(GstBaseTransform* trans, GstPadDirection direction
     GstCaps* othercaps;
 
     GST_DEBUG_OBJECT(ocdmdecrypt, "transform_caps");
-
     GST_FIXME_OBJECT(ocdmdecrypt, "Upstream caps transformation not implemented");
-    GST_FIXME_OBJECT(ocdmdecrypt, "Check for leaks");
 
     if (direction == GST_PAD_SRC) {
         // TODO:
@@ -155,12 +161,13 @@ static GstCaps* TransformCaps(GstBaseTransform* trans, GstPadDirection direction
         othercaps = gst_caps_new_empty();
         size_t size = gst_caps_get_size(caps);
         for (size_t index = 0; index < size; ++index) {
-            GstStructure* incomingStructure = gst_caps_get_structure(caps, index);
-            GstStructure* copyIncoming = gst_structure_copy(incomingStructure);
+            GstStructure* upstreamStruct = gst_caps_get_structure(caps, index);
+            GstStructure* copyUpstream = gst_structure_copy(upstreamStruct);
 
             // Removes all fields related to encryption, so the downstream caps intersection succeeds.
-            clearCencStruct(copyIncoming);
-            gst_caps_append_structure(othercaps, copyIncoming);
+            clearCencStruct(copyUpstream);
+            // "othercaps" become the owner of the "copyUpstream" structure, so no need to free.
+            gst_caps_append_structure(othercaps, copyUpstream);
         }
     }
 
@@ -206,6 +213,8 @@ static gboolean HandleProtectionEvent(GstOcdmdecrypt* ocdmdecrypt, const char* s
 
             OpenCDMError err = opencdm_session_update(ocdmdecrypt->impl->_ocdmSession, keyResponse, response.length());
 
+            gst_buffer_unmap(data, &dataView);
+
             ASSERT(err == OpenCDMError::ERROR_NONE);
             ASSERT(ocdmdecrypt->impl->_ocdmSession != nullptr);
         }
@@ -228,6 +237,8 @@ static gboolean SinkEvent(GstBaseTransform* trans, GstEvent* event)
         GST_FIXME_OBJECT(ocdmdecrypt, "HandleProtectionEvent function most likely leaks some buffers");
 
         HandleProtectionEvent(ocdmdecrypt, systemId, data);
+
+        gst_buffer_unref(data);
         gst_event_unref(event);
 
         return GST_BASE_TRANSFORM_CLASS(gst_ocdmdecrypt_parent_class)->sink_event(trans, event);
@@ -249,7 +260,7 @@ static GstFlowReturn TransformIp(GstBaseTransform* trans, GstBuffer* buffer)
         return GST_FLOW_OK;
     } else {
 
-        const GValue* streamEncryptionEventsList = gst_structure_get_value(protectionMeta->info, "stream-encryption-events");
+        // const GValue* streamEncryptionEventsList = gst_structure_get_value(protectionMeta->info, "stream-encryption-events");
         gst_structure_remove_field(protectionMeta->info, "stream-encryption-events");
 
         const GValue* value;
@@ -291,6 +302,7 @@ static GstFlowReturn TransformIp(GstBaseTransform* trans, GstBuffer* buffer)
             gst_buffer_remove_meta(buffer, reinterpret_cast<GstMeta*>(protectionMeta));
             return GST_FLOW_OK;
         } else {
+            gst_buffer_remove_meta(buffer, reinterpret_cast<GstMeta*>(protectionMeta));
             GST_ERROR_OBJECT(ocdmdecrypt, "Missing decryption data");
             return GST_FLOW_NOT_SUPPORTED;
         }
