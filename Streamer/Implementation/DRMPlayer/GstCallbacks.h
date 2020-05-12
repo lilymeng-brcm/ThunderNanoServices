@@ -1,7 +1,7 @@
 #pragma once
 
 #include "DRMPlayer.h"
-#include "GstOcdmDecrypt.h"
+#include "GstOcdmDecrypt.hpp"
 #include <gst/gst.h>
 
 namespace WPEFramework {

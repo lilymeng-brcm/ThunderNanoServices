@@ -17,8 +17,14 @@
  * limitations under the License.
  */
 
-#include "GstOcdmDecrypt.h"
-#include "open_cdm_adapter.h"
+#include "GstOcdmDecrypt.hpp"
+
+#include "IExchangeFactory.hpp"
+
+#include "ocdm/ExchangeFactory.hpp"
+#include "ocdm/KeySystems.hpp"
+#include "ocdm/Decryptor.hpp"
+
 #include <array>
 #include <core/Queue.h>
 #include <gst/base/gstbasetransform.h>
@@ -36,21 +42,14 @@ G_DEFINE_TYPE_WITH_CODE(GstOcdmdecrypt, gst_ocdmdecrypt, GST_TYPE_BASE_TRANSFORM
 constexpr static auto clearContentTypes = { "video/mp4", "audio/mp4", "audio/mpeg", "video/x-h264" };
 
 // TODO: This information should be returned from OpenCDM.
-static std::map<string, string> keySystems{ { "edef8ba9-79d6-4ace-a3c8-27dcd51d21ed", "com.widevine.alpha" },
+static std::map<std::string, std::string> keySystems{ { "edef8ba9-79d6-4ace-a3c8-27dcd51d21ed", "com.widevine.alpha" },
     { "9a04f079-9840-4286-ab92-e65be0885f95", "com.microsoft.playready" } };
 constexpr static auto cencPrefix = "application/x-cenc";
 
-struct _GstOcdmdecryptImpl {
-    OpenCDMSystem* _ocdmSystem;
-    OpenCDMSession* _ocdmSession;
-    WPEFramework::Challenger _challenger;
-};
-
 // Overwritten GstBaseTransform callbacks:
-static GstCaps* TransformCaps(GstBaseTransform* trans, GstPadDirection direction,
+static GstCaps*
+TransformCaps(GstBaseTransform* trans, GstPadDirection direction,
     GstCaps* caps, GstCaps* filter);
-static gboolean HandleProtectionEvent(GstOcdmdecrypt* ocdmdecrypt, const char* systemId,
-    GstBuffer* data);
 static gboolean SinkEvent(GstBaseTransform* trans, GstEvent* event);
 static GstFlowReturn TransformIp(GstBaseTransform* trans, GstBuffer* buffer);
 static void Finalize(GObject* object);
@@ -64,14 +63,15 @@ static void AddCapsForKeysystem(GstCaps*& caps, const string& keysystem)
                 "protection-system", G_TYPE_STRING, keysystem.c_str(), NULL));
     }
 }
-static GstCaps* SinkCaps()
+static GstCaps* SinkCaps(GstOcdmdecryptClass* klass)
 {
+    // Source the types from klass->keysystems
     GstCaps* cencCaps = gst_caps_new_empty();
     for (auto& system : keySystems) {
         if (opencdm_is_type_supported(system.second.c_str(), "") == OpenCDMError::ERROR_NONE) {
             AddCapsForKeysystem(cencCaps, system.first);
         } else {
-            GST_WARNING("Keysystem <%s> is not supported by ocdm.", system.second.c_str());
+            TRACE_L1("Keysystem: <%s> not supported by OCDM", system.second.c_str());
         }
     }
     return cencCaps;
@@ -85,16 +85,24 @@ static GstCaps* SrcCaps()
     return caps;
 }
 
+struct GstOcdmdecryptImpl {
+    WPEFramework::Core::ProxyType<WPEFramework::CENCDecryptor::IExchangeFactory> _exchangeFactory;
+    WPEFramework::Core::ProxyType<WPEFramework::CENCDecryptor::IGstDecryptor> _decryptor;
+};
+
 static void
 gst_ocdmdecrypt_class_init(GstOcdmdecryptClass* klass)
 {
     GstBaseTransformClass* base_transform_class = GST_BASE_TRANSFORM_CLASS(klass);
 
-    gst_element_class_add_pad_template(GST_ELEMENT_CLASS(klass),
-        gst_pad_template_new("src", GST_PAD_SRC, GST_PAD_ALWAYS, SrcCaps()));
+    //TODO
+    klass->_keySystems = std::move(WPEFramework::Core::ProxyType<WPEFramework::CENCDecryptor::IKeySystems>(*(new WPEFramework::CENCDecryptor::OCDMKeySystems)));
 
     gst_element_class_add_pad_template(GST_ELEMENT_CLASS(klass),
-        gst_pad_template_new("sink", GST_PAD_SINK, GST_PAD_ALWAYS, SinkCaps()));
+        gst_pad_template_new("src", GST_PAD_SRC, GST_PAD_ALWAYS, SrcCaps())); 
+
+    gst_element_class_add_pad_template(GST_ELEMENT_CLASS(klass),
+        gst_pad_template_new("sink", GST_PAD_SINK, GST_PAD_ALWAYS, SinkCaps(klass))); // TODO: KeySystemzzz
 
     gst_element_class_set_static_metadata(GST_ELEMENT_CLASS(klass),
         "FIXME Long name", GST_ELEMENT_FACTORY_KLASS_DECRYPTOR, "FIXME Description",
@@ -123,9 +131,8 @@ static void gst_ocdmdecrypt_init(GstOcdmdecrypt* ocdmdecrypt)
     gst_base_transform_set_passthrough(base, FALSE);
     gst_base_transform_set_gap_aware(base, FALSE);
 
-    ocdmdecrypt->impl = std::move(std::unique_ptr<GstOcdmDecryptImpl>(new GstOcdmDecryptImpl()));
-    ocdmdecrypt->impl->_ocdmSession = nullptr;
-    ocdmdecrypt->impl->_ocdmSystem = nullptr;
+    ocdmdecrypt->_impl->_decryptor = std::move(WPEFramework::Core::ProxyType<WPEFramework::CENCDecryptor::IGstDecryptor>(*(new WPEFramework::CENCDecryptor::OCDMDecryptor())));
+    ocdmdecrypt->_impl->_exchangeFactory = std::move(WPEFramework::Core::ProxyType<WPEFramework::CENCDecryptor::IExchangeFactory>(*(new WPEFramework::CENCDecryptor::ExchangeFactory())));
 
     GST_FIXME_OBJECT(ocdmdecrypt, "Pretty bad leaks");
     GST_FIXME_OBJECT(ocdmdecrypt, "Decryption doesn't wait for the key status");
@@ -181,47 +188,6 @@ static GstCaps* TransformCaps(GstBaseTransform* trans, GstPadDirection direction
     return othercaps;
 }
 
-static gboolean HandleProtectionEvent(GstOcdmdecrypt* ocdmdecrypt, const char* systemId, GstBuffer* data)
-{
-    if (ocdmdecrypt->impl->_ocdmSystem == nullptr) {
-        string keysystem = keySystems[systemId];
-
-        if (keysystem.empty()) {
-            TRACE_L1("Cannot initialize ocdm for keysystem: %s", systemId);
-            return FALSE;
-        }
-
-        ocdmdecrypt->impl->_ocdmSystem = opencdm_create_system(keysystem.c_str());
-
-        if (ocdmdecrypt->impl->_ocdmSession == nullptr) {
-            GstMapInfo dataView;
-            gst_buffer_map(data, &dataView, GST_MAP_READ);
-            opencdm_construct_session(ocdmdecrypt->impl->_ocdmSystem,
-                LicenseType::Temporary,
-                "cenc",
-                dataView.data,
-                static_cast<uint16_t>(dataView.size),
-                nullptr,
-                0,
-                &ocdmdecrypt->impl->_challenger.OcdmCallbacks(),
-                &ocdmdecrypt->impl->_challenger,
-                &ocdmdecrypt->impl->_ocdmSession);
-
-            string response;
-            ocdmdecrypt->impl->_challenger.KeyResponse(response);
-            const uint8_t* keyResponse = reinterpret_cast<const uint8_t*>(response.c_str());
-
-            OpenCDMError err = opencdm_session_update(ocdmdecrypt->impl->_ocdmSession, keyResponse, response.length());
-
-            gst_buffer_unmap(data, &dataView);
-
-            ASSERT(err == OpenCDMError::ERROR_NONE);
-            ASSERT(ocdmdecrypt->impl->_ocdmSession != nullptr);
-        }
-    }
-    return TRUE;
-}
-
 static gboolean SinkEvent(GstBaseTransform* trans, GstEvent* event)
 {
     GstOcdmdecrypt* ocdmdecrypt = GST_OCDMDECRYPT(trans);
@@ -234,9 +200,7 @@ static gboolean SinkEvent(GstBaseTransform* trans, GstEvent* event)
 
         gst_event_parse_protection(event, &systemId, &data, NULL);
 
-        GST_FIXME_OBJECT(ocdmdecrypt, "HandleProtectionEvent function most likely leaks some buffers");
-
-        HandleProtectionEvent(ocdmdecrypt, systemId, data);
+        ocdmdecrypt->_impl->_decryptor->HandleProtection(event);
 
         gst_buffer_unref(data);
         gst_event_unref(event);
@@ -255,58 +219,71 @@ static GstFlowReturn TransformIp(GstBaseTransform* trans, GstBuffer* buffer)
 
     GST_DEBUG_OBJECT(ocdmdecrypt, "transform_ip");
 
-    GstProtectionMeta* protectionMeta = reinterpret_cast<GstProtectionMeta*>(gst_buffer_get_protection_meta(buffer));
-    if (!protectionMeta) {
-        return GST_FLOW_OK;
-    } else {
+    // GstProtectionMeta* protectionMeta = reinterpret_cast<GstProtectionMeta*>(gst_buffer_get_protection_meta(buffer));
+    // if (!protectionMeta) {
+    //     return GST_FLOW_OK;
+    // } else {
 
-        // const GValue* streamEncryptionEventsList = gst_structure_get_value(protectionMeta->info, "stream-encryption-events");
-        gst_structure_remove_field(protectionMeta->info, "stream-encryption-events");
+    //     // const GValue* streamEncryptionEventsList = gst_structure_get_value(protectionMeta->info, "stream-encryption-events");
+    //     gst_structure_remove_field(protectionMeta->info, "stream-encryption-events");
 
-        const GValue* value;
-        value = gst_structure_get_value(protectionMeta->info, "kid");
+    //     const GValue* value;
+    //     value = gst_structure_get_value(protectionMeta->info, "kid");
 
-        GstBuffer* keyIDBuffer = nullptr;
-        keyIDBuffer = gst_value_get_buffer(value);
-        GstMapInfo mappedKeyId;
-        gst_buffer_map(keyIDBuffer, &mappedKeyId, GST_MAP_READ);
-        opencdm_session_status(ocdmdecrypt->impl->_ocdmSession, mappedKeyId.data, mappedKeyId.size);
+    //     GstBuffer* keyIDBuffer = nullptr;
+    //     keyIDBuffer = gst_value_get_buffer(value);
+    //     GstMapInfo mappedKeyId;
+    //     gst_buffer_map(keyIDBuffer, &mappedKeyId, GST_MAP_READ);
+    //     opencdm_session_status(ocdmdecrypt->_impl->_ocdmSession, mappedKeyId.data, mappedKeyId.size);
 
-        unsigned ivSize;
-        gst_structure_get_uint(protectionMeta->info, "iv_size", &ivSize);
+    //     unsigned ivSize;
+    //     gst_structure_get_uint(protectionMeta->info, "iv_size", &ivSize);
 
-        gboolean encrypted;
-        gst_structure_get_boolean(protectionMeta->info, "encrypted", &encrypted);
+    //     gboolean encrypted;
+    //     gst_structure_get_boolean(protectionMeta->info, "encrypted", &encrypted);
 
-        if (!ivSize || !encrypted) {
-            gst_buffer_remove_meta(buffer, reinterpret_cast<GstMeta*>(protectionMeta));
-            return GST_FLOW_OK;
-        }
+    //     if (!ivSize || !encrypted) {
+    //         gst_buffer_remove_meta(buffer, reinterpret_cast<GstMeta*>(protectionMeta));
+    //         return GST_FLOW_OK;
+    //     }
 
-        unsigned subSampleCount;
-        gst_structure_get_uint(protectionMeta->info, "subsample_count", &subSampleCount);
+    //     unsigned subSampleCount;
+    //     gst_structure_get_uint(protectionMeta->info, "subsample_count", &subSampleCount);
 
-        const GValue* value2;
-        GstBuffer* subSamplesBuffer = nullptr;
-        if (subSampleCount) {
-            value2 = gst_structure_get_value(protectionMeta->info, "subsamples");
-            subSamplesBuffer = gst_value_get_buffer(value2);
-        }
+    //     const GValue* value2;
+    //     GstBuffer* subSamplesBuffer = nullptr;
+    //     if (subSampleCount) {
+    //         value2 = gst_structure_get_value(protectionMeta->info, "subsamples");
+    //         subSamplesBuffer = gst_value_get_buffer(value2);
+    //     }
 
-        const GValue* value3;
-        value3 = gst_structure_get_value(protectionMeta->info, "iv");
-        GstBuffer* ivBuffer = gst_value_get_buffer(value3);
+    //     const GValue* value3;
+    //     value3 = gst_structure_get_value(protectionMeta->info, "iv");
+    //     GstBuffer* ivBuffer = gst_value_get_buffer(value3);
 
-        if (subSamplesBuffer != nullptr && ivBuffer != nullptr && keyIDBuffer != nullptr) {
-            opencdm_gstreamer_session_decrypt(ocdmdecrypt->impl->_ocdmSession, buffer, subSamplesBuffer, subSampleCount, ivBuffer, keyIDBuffer, 0);
-            gst_buffer_remove_meta(buffer, reinterpret_cast<GstMeta*>(protectionMeta));
-            return GST_FLOW_OK;
-        } else {
-            gst_buffer_remove_meta(buffer, reinterpret_cast<GstMeta*>(protectionMeta));
-            GST_ERROR_OBJECT(ocdmdecrypt, "Missing decryption data");
-            return GST_FLOW_NOT_SUPPORTED;
-        }
-    }
+    //     if (subSamplesBuffer != nullptr && ivBuffer != nullptr && keyIDBuffer != nullptr) {
+    //         OpenCDMError decryptionResult = opencdm_gstreamer_session_decrypt(ocdmdecrypt->_impl->_ocdmSession,
+    //             buffer,
+    //             subSamplesBuffer,
+    //             subSampleCount,
+    //             ivBuffer,
+    //             keyIDBuffer,
+    //             0);
+    //         if (decryptionResult != OpenCDMError::ERROR_NONE) {
+    //             GST_ERROR_OBJECT(ocdmdecrypt, "Decryption failed <%d>", decryptionResult);
+    //             gst_buffer_remove_meta(buffer, reinterpret_cast<GstMeta*>(protectionMeta));
+    //             return GST_FLOW_NOT_SUPPORTED;
+    //         } else {
+    //             gst_buffer_remove_meta(buffer, reinterpret_cast<GstMeta*>(protectionMeta));
+    //             return GST_FLOW_OK;
+    //         }
+    //     } else {
+    //         gst_buffer_remove_meta(buffer, reinterpret_cast<GstMeta*>(protectionMeta));
+    //         GST_ERROR_OBJECT(ocdmdecrypt, "Missing decryption data");
+    //         return GST_FLOW_NOT_SUPPORTED;
+    //     }
+    // }
+    return GST_FLOW_OK;
 }
 
 void Finalize(GObject* object)
